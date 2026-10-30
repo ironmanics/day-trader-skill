@@ -50,7 +50,34 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+import zlib
 import xml.etree.ElementTree as ET
+
+MAX_BYTES = 64 * 1024 * 1024   # a response bigger than this is refused, never held in memory
+
+
+def _read_capped(resp):
+    data = resp.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise urllib.error.URLError("response larger than %d MB" % (MAX_BYTES >> 20))
+    return data
+
+
+def _gunzip_capped(data):
+    d = zlib.decompressobj(31)
+    out = d.decompress(data, MAX_BYTES)
+    if d.unconsumed_tail:
+        raise urllib.error.URLError("decompressed response larger than %d MB" % (MAX_BYTES >> 20))
+    return out
+
+
+def _safe_xml(data):
+    """ElementTree expands entities; feeds and indexes never need a DOCTYPE, so refuse one."""
+    up = data.upper()
+    if b"<!DOCTYPE" in up or b"<!ENTITY" in up:
+        raise NewsError("refusing XML that declares a DOCTYPE or entity")
+    return ET.fromstring(data)
 
 YAHOO = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%s&region=US&lang=en-US"
 CHART = "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=5m"
@@ -181,9 +208,9 @@ class Fetcher(object):
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
+                data = _read_capped(resp)
                 if resp.headers.get("Content-Encoding") == "gzip":
-                    data = gzip.decompress(data)
+                    data = _gunzip_capped(data)
                 return data
         except urllib.error.HTTPError as exc:
             raise NewsError("HTTP %s for %s" % (exc.code, url))
@@ -192,7 +219,7 @@ class Fetcher(object):
 
 
 def yahoo_symbol(ticker):
-    return ticker.upper().replace(".", "-")
+    return urllib.parse.quote(ticker.upper().replace(".", "-"), safe="")
 
 
 def cik_map(fetcher, state):
@@ -241,7 +268,7 @@ def parse_time(value):
 def parse_rss(data, ticker):
     """Yahoo headline RSS -> items."""
     try:
-        root = ET.fromstring(data)
+        root = _safe_xml(data)
     except ET.ParseError as exc:
         raise NewsError("RSS for %s is not valid XML: %s" % (ticker, exc))
     out = []
@@ -258,7 +285,7 @@ def parse_rss(data, ticker):
 def parse_sec_atom(data, ticker):
     """EDGAR company filings Atom -> items."""
     try:
-        root = ET.fromstring(data)
+        root = _safe_xml(data)
     except ET.ParseError as exc:
         raise NewsError("SEC feed for %s is not valid XML: %s" % (ticker, exc))
     company = ""

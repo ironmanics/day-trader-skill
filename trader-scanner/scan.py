@@ -78,6 +78,16 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+
+MAX_BYTES = 64 * 1024 * 1024   # a response bigger than this is refused, never held in memory
+
+
+def _read_capped(resp):
+    data = resp.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise urllib.error.URLError("response larger than %d MB" % (MAX_BYTES >> 20))
+    return data
 
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 YAHOO_HOSTS = ("https://query2.finance.yahoo.com", "https://query1.finance.yahoo.com")
@@ -229,7 +239,7 @@ def day_label(d):
 def http_get(url, timeout=20):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+        return _read_capped(r).decode("utf-8", "replace")
 
 
 def yahoo_get(path):
@@ -268,7 +278,7 @@ def yahoo_get(path):
 
 
 def to_yahoo(sym):
-    return sym.upper().replace(".", "-")
+    return urllib.parse.quote(sym.upper().replace(".", "-"), safe="")
 
 
 def spark_path(symbols, rng, interval):

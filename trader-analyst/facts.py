@@ -49,6 +49,24 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zlib
+
+MAX_BYTES = 64 * 1024 * 1024   # a response bigger than this is refused, never held in memory
+
+
+def _read_capped(resp):
+    data = resp.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise urllib.error.URLError("response larger than %d MB" % (MAX_BYTES >> 20))
+    return data
+
+
+def _gunzip_capped(data):
+    d = zlib.decompressobj(31)
+    out = d.decompress(data, MAX_BYTES)
+    if d.unconsumed_tail:
+        raise urllib.error.URLError("decompressed response larger than %d MB" % (MAX_BYTES >> 20))
+    return out
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK%s.json"
@@ -110,9 +128,9 @@ class Fetcher(object):
                                                    "Accept-Encoding": "gzip"})
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
-                data = resp.read()
+                data = _read_capped(resp)
                 if resp.headers.get("Content-Encoding") == "gzip":
-                    data = gzip.decompress(data)
+                    data = _gunzip_capped(data)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise FactsError("SEC has no data at %s (no XBRL filings for this CIK?)" % url)

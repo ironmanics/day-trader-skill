@@ -56,6 +56,16 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+
+MAX_BYTES = 64 * 1024 * 1024   # a response bigger than this is refused, never held in memory
+
+
+def _read_capped(resp):
+    data = resp.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise urllib.error.URLError("response larger than %d MB" % (MAX_BYTES >> 20))
+    return data
 
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 PAUSE = 0.5    # seconds between requests: be polite to free endpoints
@@ -194,11 +204,11 @@ def market_status(now_utc):
 # ---------------------------------------------------------------- quotes
 
 def stooq_url(sym):
-    return "https://stooq.com/q/l/?s=%s.us&f=sd2t2ohlcv&h&e=csv" % sym.lower().replace(".", "-")
+    return "https://stooq.com/q/l/?s=%s.us&f=sd2t2ohlcv&h&e=csv" % urllib.parse.quote(sym.lower().replace(".", "-"), safe="")
 
 
 def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, urllib.parse.quote(sym.upper().replace(".", "-"), safe=""))
 
 
 def parse_stooq(text, sym):
@@ -255,7 +265,7 @@ def _get(url, timeout=20):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
     try:
         with _urlopen(req, timeout=timeout) as r:
-            return 200, r.read().decode("utf-8", "replace")
+            return 200, _read_capped(r).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode("utf-8", "replace")

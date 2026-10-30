@@ -45,6 +45,23 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 
+MAX_BYTES = 64 * 1024 * 1024   # a response bigger than this is refused, never held in memory
+
+
+def _read_capped(resp):
+    data = resp.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise urllib.error.URLError("response larger than %d MB" % (MAX_BYTES >> 20))
+    return data
+
+
+def _safe_xml(data):
+    """ElementTree expands entities; feeds and indexes never need a DOCTYPE, so refuse one."""
+    up = data.upper()
+    if b"<!DOCTYPE" in up or b"<!ENTITY" in up:
+        raise PtrError("refusing XML that declares a DOCTYPE or entity")
+    return ET.fromstring(data)
+
 INDEX_URL = "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/%d%s.zip"
 PTR_URL = "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/%d/%s.pdf"
 FD_URL = "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/%d/%s.pdf"
@@ -83,7 +100,7 @@ def download(url, timeout=60):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
+            return _read_capped(resp)
     except urllib.error.HTTPError as exc:
         raise PtrError("HTTP %s for %s" % (exc.code, url))
     except urllib.error.URLError as exc:
@@ -97,6 +114,8 @@ def read_index_bytes(data):
             names = [n for n in z.namelist() if n.lower().endswith(".xml")]
             if not names:
                 raise PtrError("no XML inside the ZIP (files: %s)" % ", ".join(z.namelist()))
+            if z.getinfo(names[0]).file_size > MAX_BYTES:
+                raise PtrError("ZIP member is larger than %d MB" % (MAX_BYTES >> 20))
             return z.read(names[0])
     return data
 
@@ -104,7 +123,7 @@ def read_index_bytes(data):
 def parse_index(xml_bytes, year):
     """Every filing in a <YEAR>FD.xml as a dict, newest first."""
     try:
-        root = ET.fromstring(xml_bytes)
+        root = _safe_xml(xml_bytes)
     except ET.ParseError as exc:
         raise PtrError("index is not valid XML: %s" % exc)
     out = []
@@ -456,6 +475,8 @@ def _parser():
 
 
 def _fetch_and_read(doc_id, year, pdf_dir, filed=None):
+    if not re.fullmatch(r"\d{1,12}", str(doc_id)):
+        raise PtrError("doc id must be digits, got %r" % (doc_id,))
     os.makedirs(pdf_dir, exist_ok=True)
     path = os.path.join(pdf_dir, "%s.pdf" % doc_id)
     if not os.path.isfile(path):
