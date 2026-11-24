@@ -73,6 +73,14 @@ quarter a year earlier and a positive operating margin. Banks, insurers,
 REITs and ETFs often have no usable figure; they are dropped and counted as
 "no SEC figures", not called failures.
 
+## SEC safeguards
+
+`--fundamentals` goes through trader-analyst's `sec_guard.py`: paced to 4 requests a
+second, stopped for 15 minutes after any 403 or 429, and cached for 24 hours. A run
+makes at most `--sec-budget` live requests (default 300, `0` for no cap). Stocks cut
+off by the budget or a block are counted as "deferred", not failed: run again and
+the cache covers the ones already fetched. Say so if any were deferred.
+
 ## Steps
 
 1. If `trader/universe.txt` is missing, run `trader-scanner/scan.py universe`.

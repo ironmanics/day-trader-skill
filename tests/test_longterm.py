@@ -87,11 +87,22 @@ def fake_facts(table):
     class FactsError(Exception):
         pass
 
-    class Fetcher(object):
-        def __init__(self, ua=None, offline=None):
-            pass
+    class SecStopped(FactsError):
+        pass
 
-        def json(self, url, name):
+    class Guard(object):
+        def __init__(self, budget=None):
+            self.budget = budget
+
+    class Fetcher(object):
+        def __init__(self, ua=None, offline=None, guard=None):
+            self.guard, self.live = guard, 0
+
+        def json(self, url, name, cache=False):
+            if self.guard and self.guard.budget is not None:
+                if self.live >= self.guard.budget:
+                    raise SecStopped("budget of %d used up" % self.guard.budget)
+                self.live += 1
             return {"cik": url}
 
     ciks = {t: ("%010d" % i, t) for i, t in enumerate(table, 1)}
@@ -105,7 +116,8 @@ def fake_facts(table):
     def metrics_row(s, res):
         return {"revenue_growth_yoy": res["g"], "operating_margin": res["om"], "period_end": "2026-09-30"}
 
-    return types.SimpleNamespace(Fetcher=Fetcher, FactsError=FactsError, FACTS_URL="u%s",
+    return types.SimpleNamespace(Fetcher=Fetcher, FactsError=FactsError, SecStopped=SecStopped,
+                                 sec_guard=types.SimpleNamespace(Guard=Guard), FACTS_URL="u%s",
                                  ticker_ciks=lambda f: ciks, analyse=analyse, metrics_row=metrics_row)
 
 
@@ -118,6 +130,15 @@ class Fundamentals(unittest.TestCase):
                          {"GOOD": True, "LOSS": False, "SHRINK": False, "BANK": None, "ERR": None, "ETF": None})
         self.assertIn("error", out["ERR"])
         self.assertIn("error", out["ETF"])
+
+    def test_budget_defers_the_rest_instead_of_failing_them(self):
+        f = fake_facts({"A": (5.0, 5.0), "B": (5.0, 5.0), "C": (5.0, 5.0), "D": (5.0, 5.0)})
+        out = lt.fundamentals(f, ["A", "B", "C", "D"], budget=2)
+        self.assertEqual([out[s]["pass"] for s in "AB"], [True, True])
+        for s in "CD":
+            self.assertTrue(out[s]["deferred"], s)
+            self.assertIsNone(out[s]["pass"])
+        self.assertEqual(len(lt.fundamentals(f, ["A", "B", "C", "D"], budget=0)), 4)
 
 
 def spark_doc(table):

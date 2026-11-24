@@ -43,6 +43,7 @@ import datetime as _dt
 import email.utils
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -70,6 +71,23 @@ def _gunzip_capped(data):
     if d.unconsumed_tail:
         raise urllib.error.URLError("decompressed response larger than %d MB" % (MAX_BYTES >> 20))
     return out
+
+
+def _load_guard():
+    if "sec_guard" in sys.modules:  # one copy per process, so SecStop means the same thing everywhere
+        return sys.modules["sec_guard"]
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "trader-analyst", "sec_guard.py")
+    if not os.path.isfile(path):
+        raise SystemExit("news: needs trader-analyst installed beside trader-news (shared SEC guard: %s)" % path)
+    spec = importlib.util.spec_from_file_location("sec_guard", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sys.modules["sec_guard"] = mod
+    return mod
+
+
+sec_guard = _load_guard()
 
 
 def _safe_xml(data):
@@ -117,6 +135,10 @@ KEYWORDS = [
 
 class NewsError(Exception):
     pass
+
+
+class SecStopped(NewsError):
+    """The SEC guard refused a request (cooldown after a 403 or 429)."""
 
 
 # ---------------------------------------------------------------- time
@@ -185,11 +207,12 @@ def sec_user_agent(cli=None, config="trader/config.json"):
 # ---------------------------------------------------------------- fetching
 
 class Fetcher(object):
-    def __init__(self, sec_ua=None, offline=None, pause=0.15):
+    def __init__(self, sec_ua=None, offline=None, pause=0.15, guard=None):
         self.sec_ua = sec_ua
         self.offline = offline
-        self.pause = pause
+        self.pause = pause  # Yahoo only; SEC pacing is the guard's
         self._last = 0.0
+        self.guard = guard or sec_guard.Guard()
 
     def get(self, url, name, sec=False):
         if self.offline:
@@ -200,10 +223,16 @@ class Fetcher(object):
                 return fh.read()
         if sec and not self.sec_ua:
             raise NewsError("no SEC User-Agent set")
-        gap = time.time() - self._last
-        if gap < self.pause:
-            time.sleep(self.pause - gap)
-        self._last = time.time()
+        if sec:  # SEC calls share one clock, breaker and budget across every skill
+            try:
+                self.guard.before()
+            except sec_guard.SecStop as exc:
+                raise SecStopped(str(exc))
+        else:
+            gap = time.time() - self._last
+            if gap < self.pause:
+                time.sleep(self.pause - gap)
+            self._last = time.time()
         headers = {"User-Agent": self.sec_ua if sec else BROWSER_UA, "Accept-Encoding": "gzip"}
         req = urllib.request.Request(url, headers=headers)
         try:
@@ -213,6 +242,11 @@ class Fetcher(object):
                     data = _gunzip_capped(data)
                 return data
         except urllib.error.HTTPError as exc:
+            if sec:
+                try:
+                    self.guard.after_error(exc)
+                except sec_guard.SecStop as stop:
+                    raise SecStopped(str(stop))
             raise NewsError("HTTP %s for %s" % (exc.code, url))
         except urllib.error.URLError as exc:
             raise NewsError("could not reach %s: %s" % (url, exc.reason))
@@ -430,6 +464,9 @@ def collect(fetcher, watch, state, sec=True, forms=("8-K",), count=10, errors=No
                     data = fetcher.get(SEC_FEED % (cik, form, count),
                                        "sec-%s-%s.xml" % (form, cik), sec=True)
                     items += parse_sec_atom(data, t)
+                except SecStopped as exc:
+                    errors.append("SEC filings stopped for the rest of this check: %s" % exc)
+                    return items
                 except NewsError as exc:
                     errors.append("SEC %s for %s: %s" % (form, t, exc))
     return items

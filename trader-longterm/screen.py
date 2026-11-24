@@ -124,22 +124,29 @@ def screen_prices(data, symbols, now_utc, r, min_price, min_dollar_volume):
 
 # ---------------------------------------------------------------- optional SEC pass
 
-def fundamentals(facts, symbols, ua=None, offline=None):
-    """{SYM: {revenue_growth_yoy, operating_margin, ..., pass}}; pass is None when SEC has no figure."""
-    f = facts.Fetcher(ua=ua, offline=offline)
+def fundamentals(facts, symbols, ua=None, offline=None, budget=None):
+    """{SYM: {revenue_growth_yoy, operating_margin, ..., pass}}; pass is None when SEC has no figure.
+    budget caps live SEC requests; cached answers are free. Stocks the budget or a SEC block
+    cut off are marked deferred, and the next run picks them up from the cache."""
+    guard = facts.sec_guard.Guard(budget=budget) if budget else None
+    f = facts.Fetcher(ua=ua, offline=offline, guard=guard)
     try:
         ciks = facts.ticker_ciks(f)
     except facts.FactsError as e:
         raise ScreenError(str(e))
     out = {}
-    for s in symbols:
+    for i, s in enumerate(symbols):
         cik, name = ciks.get(s.replace("-", "."), (None, None))
         if not cik:
             out[s] = {"error": "no SEC filer found (an ETF or foreign issuer?)", "pass": None}
             continue
         try:
-            cf = f.json(facts.FACTS_URL % cik, "companyfacts-CIK%s.json" % cik)
+            cf = f.json(facts.FACTS_URL % cik, "companyfacts-CIK%s.json" % cik, cache=True)
             row = facts.metrics_row(s, facts.analyse(cf, quarters=6, name=name))
+        except facts.SecStopped as e:
+            for rest in symbols[i:]:
+                out[rest] = {"error": str(e), "deferred": True, "pass": None}
+            break
         except facts.FactsError as e:
             out[s] = {"error": str(e), "pass": None}
             continue
@@ -179,13 +186,15 @@ def run(a):
     if facts:
         need = [x["symbol"] for x in rows if check or x["passed"]]
         scan.progress(a, "Reading SEC figures for %d stocks..." % len(need))
-        funds = fundamentals(facts, need, ua, a.facts_offline)
+        funds = fundamentals(facts, need, ua, a.facts_offline, a.sec_budget)
         for x in rows:
             if x["symbol"] in funds:
                 x["fundamentals"] = funds[x["symbol"]]
     listed = rows if check else sorted((x for x in rows if x["passed"]), key=lambda x: (-x["mom_12_1_pct"], x["symbol"]))
     if facts and not check:
-        counts["no_sec_figures"] = sum(1 for x in listed if x["fundamentals"]["pass"] is None)
+        fl = [x["fundamentals"] for x in listed]
+        counts["sec_deferred"] = sum(1 for g in fl if g.get("deferred"))
+        counts["no_sec_figures"] = sum(1 for g in fl if g["pass"] is None and not g.get("deferred"))
         listed = [x for x in listed if x["fundamentals"]["pass"]]
     counts["listed"] = len(listed)
     doc = {"created_by": "trader-longterm", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": a.cmd,
@@ -236,8 +245,8 @@ def render(a, doc, last_date, symbols, nfailed):
               "$%s+ traded in the last session." % (rl["min_momentum_pct"], rl["max_off_high_pct"],
                                                      rl["max_drawdown_pct"], rl["min_price"],
                                                      "{:,.0f}".format(rl["min_dollar_volume"])))
-        extra = (", %d of those pass the SEC check (%d had no SEC figures)" % (
-            counts["listed"], counts["no_sec_figures"])) if rl["fundamentals"] else ""
+        extra = (", %d of those pass the SEC check (%d had no SEC figures, %d deferred: run again to continue)" % (
+            counts["listed"], counts["no_sec_figures"], counts["sec_deferred"])) if rl["fundamentals"] else ""
         print("%d passed the price rules%s. Highest 12-1 momentum first:" % (counts["passed"], extra))
     for x in doc["rows"][:a.show]:
         print("  %-6s $%9.2f  12-1 %+7.1f%%  vs 52wk high %6.1f%%  6mo drawdown %6.1f%%  vol %5.1f%%  vs 200d %+6.1f%%%s" % (
@@ -268,6 +277,8 @@ def _parser():
         p.add_argument("--max-off-high", type=float, default=25.0, help="percent below the 52-week high (25)")
         p.add_argument("--max-drawdown", type=float, default=40.0, help="worst 6-month peak-to-trough fall, percent (40)")
         p.add_argument("--fundamentals", action="store_true", help="SEC pass: revenue up year on year, operating margin positive")
+        p.add_argument("--sec-budget", type=int, default=300,
+                       help="live SEC requests per run, 0 for no cap (300); cached answers are free")
         p.add_argument("--user-agent", help='SEC User-Agent: "Your Name you@example.com"')
         p.add_argument("--config", default="trader/config.json")
         p.add_argument("--facts-offline", metavar="DIR")

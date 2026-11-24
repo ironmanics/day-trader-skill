@@ -42,6 +42,7 @@ Numbers only: this tool never says whether a stock is a buy.
 import argparse
 import datetime as _dt
 import gzip
+import importlib.util
 import json
 import os
 import re
@@ -67,6 +68,20 @@ def _gunzip_capped(data):
     if d.unconsumed_tail:
         raise urllib.error.URLError("decompressed response larger than %d MB" % (MAX_BYTES >> 20))
     return out
+
+
+def _load_guard():
+    if "sec_guard" in sys.modules:  # one copy per process, so SecStop means the same thing everywhere
+        return sys.modules["sec_guard"]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sec_guard.py")
+    spec = importlib.util.spec_from_file_location("sec_guard", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sys.modules["sec_guard"] = mod
+    return mod
+
+
+sec_guard = _load_guard()
 
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK%s.json"
@@ -94,6 +109,10 @@ class FactsError(Exception):
     pass
 
 
+class SecStopped(FactsError):
+    """The SEC guard refused a request (cooldown after a 403 or 429, or the run's budget)."""
+
+
 def user_agent(cli=None, config="trader/config.json"):
     ua = (cli or os.environ.get("SEC_USER_AGENT") or "").strip()
     if not ua and config and os.path.isfile(config):
@@ -108,10 +127,12 @@ def user_agent(cli=None, config="trader/config.json"):
 
 
 class Fetcher(object):
-    def __init__(self, ua=None, offline=None, pause=0.15):
-        self.ua, self.offline, self.pause, self._last = ua, offline, pause, 0.0
+    def __init__(self, ua=None, offline=None, pause=sec_guard.PAUSE, guard=None):
+        self.ua, self.offline = ua, offline
+        self.guard = guard or sec_guard.Guard(pause=pause)
 
-    def json(self, url, name):
+    def json(self, url, name, cache=False):
+        """cache=True keeps the answer 24 hours: right for figures that change quarterly."""
         if self.offline:
             path = os.path.join(self.offline, name)
             if not os.path.isfile(path):
@@ -120,10 +141,21 @@ class Fetcher(object):
                 return json.load(fh)
         if not self.ua:
             raise FactsError(UA_HELP)
-        gap = time.time() - self._last
-        if gap < self.pause:
-            time.sleep(self.pause - gap)
-        self._last = time.time()
+        data = self.guard.cache_get(url) if cache else None
+        if data is None:
+            data = self._live(url)
+            if cache:
+                self.guard.cache_put(url, data)
+        return json.loads(data.decode("utf-8"))
+
+    def _live(self, url):
+        try:
+            return self._request(url)
+        except sec_guard.SecStop as exc:
+            raise SecStopped(str(exc))
+
+    def _request(self, url):
+        self.guard.before()
         req = urllib.request.Request(url, headers={"User-Agent": self.ua,
                                                    "Accept-Encoding": "gzip"})
         try:
@@ -131,13 +163,14 @@ class Fetcher(object):
                 data = _read_capped(resp)
                 if resp.headers.get("Content-Encoding") == "gzip":
                     data = _gunzip_capped(data)
+                return data
         except urllib.error.HTTPError as exc:
+            self.guard.after_error(exc)
             if exc.code == 404:
                 raise FactsError("SEC has no data at %s (no XBRL filings for this CIK?)" % url)
             raise FactsError("HTTP %s for %s" % (exc.code, url))
         except urllib.error.URLError as exc:
             raise FactsError("could not reach %s: %s" % (url, exc.reason))
-        return json.loads(data.decode("utf-8"))
 
 
 # ---------------------------------------------------------------- facts
@@ -477,7 +510,7 @@ def clean_title(title):
 
 def ticker_ciks(fetcher):
     """ticker -> (10-digit CIK, company name) from company_tickers.json."""
-    data = fetcher.json(TICKERS_URL, "company_tickers.json")
+    data = fetcher.json(TICKERS_URL, "company_tickers.json", cache=True)
     out = {}
     for v in data.values():
         out.setdefault(v["ticker"].upper().replace("-", "."),
@@ -524,12 +557,16 @@ def main(argv=None):
             failed += 1
             continue
         try:
-            cf = fetcher.json(FACTS_URL % cik, "companyfacts-CIK%s.json" % cik)
+            cf = fetcher.json(FACTS_URL % cik, "companyfacts-CIK%s.json" % cik, cache=True)
             result = analyse(cf, quarters=args.quarters, name=name)
             filings = None
             if not args.no_filings:
                 sub = fetcher.json(SUBMISSIONS_URL % cik, "submissions-CIK%s.json" % cik)
                 filings = latest_filings(sub, cik, fetcher)
+        except SecStopped as exc:
+            print("facts: %s: %s" % (tick, exc), file=sys.stderr)
+            failed += 1
+            break
         except FactsError as exc:
             print("facts: %s: %s" % (tick, exc), file=sys.stderr)
             failed += 1

@@ -50,6 +50,19 @@ email. It refuses to call SEC without one.
   headlines or on the company's investor relations page, and say where it
   came from.
 
+## SEC safeguards
+
+`sec_guard.py` (in this folder, shared with trader-news and trader-longterm) keeps
+every SEC request under the SEC's 10-a-second limit:
+
+- One request slot every 0.25 s, shared by every skill running at once.
+- A 403 or 429 stops all SEC calls for 15 minutes (longer if the SEC says so).
+  Nothing is sent while it cools down. Do not delete `trader/state/sec-blocked.json`
+  to get around it; the block is real.
+- Company facts and the ticker list are cached for 24 hours in `trader/state/sec-cache/`.
+
+If a run says SEC calls are stopped, tell the user and wait. Never retry in a loop.
+
 ## The rules
 
 - **Filed numbers first.** The table comes from XBRL facts the company filed.
