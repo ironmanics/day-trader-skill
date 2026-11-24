@@ -72,6 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
 | `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-longterm` | Long-Term Screen | Fork addition. Lists stocks that pass fixed trend and drawdown rules over two years of daily closes. Numbers only, no picks. |
 
 ## How to use it
 
